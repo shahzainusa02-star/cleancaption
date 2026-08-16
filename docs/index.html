@@ -56,7 +56,6 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   .row button,.row a{flex:1;text-align:center}.sliderRow{grid-template-columns:64px 1fr 42px}
 }
 </style>
-<script async src="https://docs.opencv.org/4.x/opencv.js"></script>
 </head>
 <body>
 <main>
@@ -67,7 +66,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   <div class="pills">
     <span class="pill">Processes on your device</span>
     <span class="pill">Android · iPhone · Mac · Windows</span>
-    <span class="pill alt">Online Beta · Engine v3</span>
+    <span class="pill alt">Online Beta · Lite v3.2</span>
   </div>
 </header>
 
@@ -114,7 +113,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   </div>
   <div class="progress"><div id="progressBar" class="bar"></div></div>
   <div id="status" class="status">Ready.</div>
-  <div class="warning">CaptionClean v3 uses the browser's native WebCodecs video engine instead of ffmpeg.wasm. Keep this tab open while it processes. Short videos are still recommended while the Online Beta is being tested.</div>
+  <div class="warning">CaptionClean Lite v3.2 removes the heavy OpenCV engine. It processes only the caption region with lightweight JavaScript so the page stays responsive on phones and older computers.</div>
 </section>
 
 <section id="resultCard" class="card hidden">
@@ -130,10 +129,26 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
 
 <footer>
   CaptionClean Online Beta · Your selected video is processed in this browser session.<br>
-  The page loads browser media-processing libraries from public CDNs; your selected video is processed locally and is not intentionally uploaded by CaptionClean.
+  Your selected video is processed locally in this browser session and is not intentionally uploaded by CaptionClean.
 </footer>
 </main>
 
+<script>
+(async()=>{
+  try{
+    if("serviceWorker" in navigator){
+      const regs=await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r=>r.unregister()));
+    }
+    if("caches" in window){
+      const keys=await caches.keys();
+      await Promise.all(keys.map(k=>caches.delete(k)));
+    }
+  }catch(e){
+    console.warn("Old CaptionClean cache cleanup skipped:",e);
+  }
+})();
+</script>
 <script type="module">
 import {
   Input,
@@ -169,7 +184,6 @@ let selectedFile = null;
 let inputURL = null;
 let outputURL = null;
 let deferredInstallPrompt = null;
-let cvInstance = null;
 
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
@@ -438,18 +452,6 @@ function detectCaptionBox(img){
   ];
 }
 
-async function ensureCV(){
-  if(cvInstance) return cvInstance;
-  const deadline=Date.now()+30000;
-  while(!window.cv && Date.now()<deadline) await new Promise(r=>setTimeout(r,100));
-  if(!window.cv) return null;
-  let c=window.cv;
-  try{ if(c && typeof c.then==="function") c=await c; }catch(_){}
-  if(!c || !c.Mat) return null;
-  cvInstance=c;
-  return c;
-}
-
 function fallbackInpaint(img,box){
   if(!box)return img;
   const {data,width:w,height:h}=img;
@@ -477,29 +479,172 @@ function fallbackInpaint(img,box){
   return img;
 }
 
-async function inpaintImage(img,box){
-  if(!box) return img;
-  const c=await ensureCV();
-  if(!c || typeof c.inpaint!=="function") return fallbackInpaint(img,box);
+async function inpaintCanvasRegion(ctx, frameW, frameH, box){
+  if(!box) return;
 
-  let rgba=null,rgb=null,mask=null,dst=null,out=null;
-  try{
-    rgba=c.matFromImageData(img);
-    rgb=new c.Mat(); c.cvtColor(rgba,rgb,c.COLOR_RGBA2RGB);
-    mask=c.Mat.zeros(img.height,img.width,c.CV_8UC1);
-    c.rectangle(mask,new c.Point(box[0],box[1]),new c.Point(box[2],box[3]),new c.Scalar(255),-1);
-    const k=c.getStructuringElement(c.MORPH_ELLIPSE,new c.Size(5,5));
-    c.dilate(mask,mask,k); k.delete();
-    dst=new c.Mat();
-    c.inpaint(rgb,mask,dst,3,c.INPAINT_TELEA);
-    out=new c.Mat(); c.cvtColor(dst,out,c.COLOR_RGB2RGBA);
-    return new ImageData(new Uint8ClampedArray(out.data),img.width,img.height);
-  }catch(e){
-    console.warn("OpenCV inpaint unavailable; using browser fallback.",e);
-    return fallbackInpaint(img,box);
-  }finally{
-    [rgba,rgb,mask,dst,out].forEach(m=>{try{m&&m.delete()}catch(_){}});
+  let [bx0,by0,bx1,by1]=box.map(Math.round);
+  bx0=Math.max(1,Math.min(frameW-2,bx0));
+  bx1=Math.max(1,Math.min(frameW-2,bx1));
+  by0=Math.max(1,Math.min(frameH-2,by0));
+  by1=Math.max(1,Math.min(frameH-2,by1));
+  if(bx1<=bx0 || by1<=by0) return;
+
+  // Work only on a small padded caption region.
+  const pad=Math.max(5,Math.round(Math.min(frameW,frameH)*0.010));
+  const rx0=Math.max(1,bx0-pad);
+  const ry0=Math.max(1,by0-pad);
+  const rx1=Math.min(frameW-2,bx1+pad);
+  const ry1=Math.min(frameH-2,by1+pad);
+  const rw=rx1-rx0+1, rh=ry1-ry0+1;
+
+  const roi=ctx.getImageData(rx0,ry0,rw,rh);
+  const data=roi.data;
+  const src=new Uint8ClampedArray(data);
+
+  const lx=Math.max(1,bx0-rx0);
+  const rx=Math.min(rw-2,bx1-rx0);
+  const ty=Math.max(1,by0-ry0);
+  const by=Math.min(rh-2,by1-ry0);
+
+  const boxW=Math.max(1,rx-lx);
+  const boxH=Math.max(1,by-ty);
+
+  // Lightweight edge interpolation.
+  // Each removed pixel is reconstructed from the nearest pixels just outside
+  // the caption box. This is intentionally simple so phones and older Macs
+  // remain responsive.
+  for(let y=ty;y<=by;y++){
+    const fy=(y-ty)/boxH;
+    for(let x=lx;x<=rx;x++){
+      const fx=(x-lx)/boxW;
+      const i=(y*rw+x)*4;
+
+      const top=((ty-1)*rw+x)*4;
+      const bottom=((by+1)*rw+x)*4;
+      const left=(y*rw+(lx-1))*4;
+      const right=(y*rw+(rx+1))*4;
+
+      // Give more weight to the closest pair of borders.
+      const dy=Math.min(fy,1-fy);
+      const dx=Math.min(fx,1-fx);
+      const sum=Math.max(0.0001,dx+dy);
+      const verticalWeight=dx/sum;
+      const horizontalWeight=dy/sum;
+
+      for(let c=0;c<3;c++){
+        const vertical=src[top+c]*(1-fy)+src[bottom+c]*fy;
+        const horizontal=src[left+c]*(1-fx)+src[right+c]*fx;
+        data[i+c]=Math.round(
+          vertical*verticalWeight + horizontal*horizontalWeight
+        );
+      }
+      data[i+3]=255;
+    }
   }
+
+  ctx.putImageData(roi,rx0,ry0);
+}
+
+function detectCaptionBoxFromCanvas(ctx,w,h){
+  const yA=Math.max(0,Math.floor(h*.72));
+  const yB=Math.min(h,Math.ceil(h*.84));
+  const band=ctx.getImageData(0,yA,w,yB-yA);
+  const {data}=band;
+  const rh=band.height;
+  const sx=Math.max(.5,w/478), sy=Math.max(.5,h/850);
+  const binary=new Uint8Array(w*rh);
+
+  for(let y=0;y<rh;y++){
+    for(let x=0;x<w;x++){
+      const idx=(y*w+x)*4;
+      if(pixelWhite(data,idx)) binary[y*w+x]=1;
+    }
+  }
+
+  const seen=new Uint8Array(binary.length);
+  const comps=[];
+  const minArea=Math.max(3,Math.round(7*sx*sy));
+  const maxArea=Math.max(minArea+1,Math.round(650*sx*sy));
+  const dirs=[-1,-1,0,-1,1,-1,-1,0,1,0,-1,1,0,1,1,1];
+
+  for(let yy=0;yy<rh;yy++){
+    for(let xx=0;xx<w;xx++){
+      const pos=yy*w+xx;
+      if(!binary[pos]||seen[pos])continue;
+
+      let stack=[pos],area=0,minX=xx,maxX=xx,minY=yy,maxY=yy;
+      seen[pos]=1;
+
+      while(stack.length){
+        const p=stack.pop();
+        const y=Math.floor(p/w),x=p-y*w;
+        area++;
+        if(x<minX)minX=x;if(x>maxX)maxX=x;
+        if(y<minY)minY=y;if(y>maxY)maxY=y;
+
+        for(let d=0;d<dirs.length;d+=2){
+          const nx=x+dirs[d],ny=y+dirs[d+1];
+          if(nx<0||nx>=w||ny<0||ny>=rh)continue;
+          const np=ny*w+nx;
+          if(binary[np]&&!seen[np]){seen[np]=1;stack.push(np);}
+        }
+      }
+
+      const ww=maxX-minX+1,hh=maxY-minY+1;
+      if(area<minArea||area>maxArea)continue;
+      if(ww<Math.max(2,2*sx)||ww>Math.max(4,55*sx))continue;
+      if(hh<Math.max(4,5*sy)||hh>Math.max(6,31*sy))continue;
+
+      const gy=yA+minY;
+      comps.push([minX,gy,ww,hh,area,gy+hh]);
+    }
+  }
+
+  const xMargin=Math.round(35*sx);
+  const baseMin=668/850*h,baseMax=686/850*h;
+  const core=comps.filter(c=>c[0]+c[2]>xMargin&&c[0]<w-xMargin&&c[5]>=baseMin&&c[5]<=baseMax);
+  const strong=core.filter(c=>c[3]>=Math.max(5,14*sy)&&c[1]<=663/850*h);
+  if(strong.length<2)return null;
+
+  const baselines=[...new Set(strong.map(c=>Math.round(c[5])))];
+  let best=null;
+
+  for(const baseline of baselines){
+    const group=strong.filter(c=>Math.abs(c[5]-baseline)<=Math.max(1,1.5*sy));
+    if(!group.length)continue;
+    const gx0=Math.min(...group.map(c=>c[0]));
+    const gx1=Math.max(...group.map(c=>c[0]+c[2]));
+    const center=(gx0+gx1)/2;
+    const score=group.length*6+(gx1-gx0)/Math.max(1,20*sx)
+      -Math.abs(center-w/2)/Math.max(1,25*sx)
+      -Math.abs(baseline-676/850*h)/Math.max(1,sy)*.8;
+    if(!best||score>best.score)best={score,baseline,group};
+  }
+
+  if(!best||best.group.length<2||best.score<10)return null;
+
+  const ax0=Math.min(...best.group.map(c=>c[0]));
+  const ax1=Math.max(...best.group.map(c=>c[0]+c[2]));
+  const same=core.filter(c=>Math.abs(c[5]-best.baseline)<=Math.max(2,2*sy)&&c[1]<=666/850*h);
+  const extras=core.filter(c=>
+    c[1]>=647/850*h&&c[1]<=665/850*h&&
+    c[5]>=best.baseline-Math.max(2,2*sy)&&
+    c[5]<=best.baseline+Math.max(4,9*sy)&&
+    c[0]<=ax1+28*sx&&c[0]+c[2]>=ax0-28*sx
+  );
+
+  const group=[...best.group,...same,...extras];
+  const x0=Math.min(...group.map(c=>c[0]));
+  const x1=Math.max(...group.map(c=>c[0]+c[2]));
+  const y0=Math.min(...group.map(c=>c[1]));
+  const y1=Math.max(...group.map(c=>c[1]+c[3]));
+
+  return [
+    Math.max(0,Math.round(x0-14*sx)),
+    Math.max(0,Math.round(y0-10*sy)),
+    Math.min(w-1,Math.round(x1+14*sx)),
+    Math.min(h-1,Math.round(y1+12*sy))
+  ];
 }
 
 function ensureWebCodecs(){
@@ -508,8 +653,8 @@ function ensureWebCodecs(){
   }
 }
 
-async function processVideoSample(sample, state){
-  if(!workCanvas.width || workCanvas.width!==sample.displayWidth || workCanvas.height!==sample.displayHeight){
+async function processVideoSample(sample,state){
+  if(!workCanvas.width||workCanvas.width!==sample.displayWidth||workCanvas.height!==sample.displayHeight){
     workCanvas.width=sample.displayWidth;
     workCanvas.height=sample.displayHeight;
   }
@@ -517,14 +662,13 @@ async function processVideoSample(sample, state){
   const ctx=workCanvas.getContext("2d",{willReadFrequently:true});
   sample.draw(ctx,0,0);
 
-  let img=ctx.getImageData(0,0,workCanvas.width,workCanvas.height);
   let box;
-
   if(mode()==="manual"){
-    box=currentManualBox(img.width,img.height);
+    box=currentManualBox(workCanvas.width,workCanvas.height);
   }else{
-    box=detectCaptionBox(img);
-    if(!box && state.previousBox && state.misses<2){
+    box=detectCaptionBoxFromCanvas(ctx,workCanvas.width,workCanvas.height);
+
+    if(!box&&state.previousBox&&state.misses<2){
       box=state.previousBox;
       state.misses++;
     }else if(box){
@@ -537,15 +681,13 @@ async function processVideoSample(sample, state){
   }
 
   if(box){
-    img=await inpaintImage(img,box);
-    ctx.putImageData(img,0,0);
+    await inpaintCanvasRegion(ctx,workCanvas.width,workCanvas.height,box);
   }
 
   state.frames++;
-  // Give the UI thread regular opportunities to repaint and remain responsive.
-  if(state.frames%2===0){
-    await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
-  }
+
+  // Yield after every frame so Chrome can repaint/respond.
+  await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
 
   return workCanvas;
 }
@@ -585,7 +727,7 @@ processBtn.addEventListener("click",async()=>{
 
     const metrics=await videoTrack.computeFrameRateMetrics();
     const guessedFps=Number(metrics?.bestGuessFrameRate)||30;
-    const targetFps=Math.max(12,Math.min(30,guessedFps));
+    const targetFps=isMobile ? Math.max(8,Math.min(12,guessedFps)) : Math.max(10,Math.min(15,guessedFps));
 
     const output=new Output({
       format:new Mp4OutputFormat(),
@@ -638,7 +780,7 @@ processBtn.addEventListener("click",async()=>{
     console.error(e);
     statusEl.classList.add("error");
     statusEl.textContent="Processing failed: "+(e?.message||String(e))+
-      "\n\nCaptionClean v3 no longer uses the heavy ffmpeg.wasm engine. If this still fails, send a screenshot of this exact message.";
+      "\n\nCaptionClean Lite v3.2 uses WebCodecs plus lightweight caption-region processing. If this still fails, send a screenshot of this exact message.";
   }finally{
     processBtn.disabled=false;
     checkBtn.disabled=false;
@@ -668,9 +810,7 @@ installBtn.addEventListener("click",async()=>{
   deferredInstallPrompt=null;installBtn.classList.add("hidden");
 });
 
-if("serviceWorker" in navigator){
-  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js").catch(console.warn));
-}
+// Service worker is intentionally disabled in Lite v3.2 while the editor is being tested.
 </script>
 </body>
 </html>

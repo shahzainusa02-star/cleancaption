@@ -504,9 +504,11 @@ async function ensureFFmpeg(){
   ffmpeg=new FFmpeg();
   ffmpeg.on("log",({message})=>console.debug("[ffmpeg]",message));
   const base="https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
+  const classWorkerURL = new URL("./ffmpeg-worker.js", window.location.href).href;
   await ffmpeg.load({
     coreURL:await toBlobURL(`${base}/ffmpeg-core.js`,"text/javascript"),
-    wasmURL:await toBlobURL(`${base}/ffmpeg-core.wasm`,"application/wasm")
+    wasmURL:await toBlobURL(`${base}/ffmpeg-core.wasm`,"application/wasm"),
+    classWorkerURL
   });
   ffmpegLoaded=true;
 }

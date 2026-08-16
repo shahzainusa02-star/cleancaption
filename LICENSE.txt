@@ -1,0 +1,15 @@
+CleanCaption Proprietary License
+
+Copyright (c) 2026 CleanCaption. All rights reserved.
+
+Permission is granted to download and use the unmodified CleanCaption v1.0 Beta
+application for personal or internal business use.
+
+You may not sell, sublicense, redistribute modified versions, remove ownership notices,
+or represent the software as your own product without written permission from the
+CleanCaption copyright holder.
+
+This license applies only to the original CleanCaption application code and branding.
+Third-party software and libraries remain subject to their own licenses.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.

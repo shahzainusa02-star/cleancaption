@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CleanCaption v1.0 Beta</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,#070d19,#0b1223);color:#f7f9ff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}
+main{max-width:860px;margin:auto;padding:48px 18px 72px}
+.brand{text-align:center;margin-bottom:28px}
+.logo{width:62px;height:62px;border-radius:18px;margin:0 auto 14px;display:grid;place-items:center;background:linear-gradient(135deg,#765cff,#31b7ff);font-size:29px;font-weight:900;box-shadow:0 14px 40px rgba(80,84,255,.26)}
+h1{font-size:45px;margin:0 0 8px}.sub{color:#aab5c9;line-height:1.55;max-width:680px;margin:0 auto}
+.card{background:rgba(17,26,48,.94);border:1px solid #2b3753;border-radius:22px;padding:21px;box-shadow:0 20px 70px rgba(0,0,0,.25)}
+.badges{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.badge{background:#153a31;color:#92e2c1;padding:8px 11px;border-radius:999px;font-size:13px}
+.badge.secondary{background:#222e49;color:#c5cee0}
+.pick{display:flex;min-height:158px;align-items:center;justify-content:center;border:2px dashed #566580;border-radius:16px;cursor:pointer;background:#0c1426;transition:.2s}
+.pick:hover{border-color:#826eff;background:#101a31}
+.pick input{display:none}.pick strong{background:#765cff;padding:13px 22px;border-radius:11px}
+#chosen{text-align:center;color:#aab5c9;margin:12px 0}
+video{width:100%;max-height:570px;background:#000;border-radius:14px;margin-top:12px}
+.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:16px}
+button,a.download{border:0;border-radius:11px;padding:13px 18px;font-weight:760;font-size:15px;text-decoration:none;cursor:pointer}
+button{background:#765cff;color:#fff}button:disabled{opacity:.48;cursor:not-allowed}
+.download{display:inline-block;background:#169b6d;color:white}
+.hidden{display:none!important}
+#status{white-space:pre-wrap;color:#bac4d7;line-height:1.5;margin-top:14px;min-height:24px}
+.note{font-size:13px;color:#8995aa;line-height:1.55;margin-top:19px;padding-top:16px;border-top:1px solid #26334e}
+.warning{color:#e8c77a}
+</style>
+</head>
+<body>
+<main>
+<div class="brand">
+  <div class="logo">C</div>
+  <h1>CleanCaption</h1>
+  <p class="sub">Remove supported burned-in captions locally on your Mac. Your video stays on your computer.</p>
+</div>
+
+<div class="card">
+  <div class="badges">
+    <span class="badge">100% Local</span>
+    <span class="badge">No API Key</span>
+    <span class="badge secondary">v1.0 Beta</span>
+  </div>
+
+  <label class="pick" for="file">
+    <input id="file" type="file" accept="video/*">
+    <strong>Choose Video</strong>
+  </label>
+
+  <div id="chosen">No video selected</div>
+  <video id="preview" class="hidden" controls playsinline></video>
+
+  <div class="actions">
+    <button id="start">Remove Captions</button>
+    <a id="download" class="download hidden" download="cleaned-video.mp4">Download Cleaned Video</a>
+  </div>
+
+  <div id="status">Ready.</div>
+
+  <p class="note"><span class="warning">Beta support:</span> optimized for centered white captions with a dark outline in the lower-middle area of portrait videos. Keep the Terminal window open while processing.</p>
+</div>
+</main>
+
+<script>
+const f=document.getElementById("file");
+const preview=document.getElementById("preview");
+const chosen=document.getElementById("chosen");
+const start=document.getElementById("start");
+const statusEl=document.getElementById("status");
+const download=document.getElementById("download");
+let selected=null, previewUrl=null, startedAt=0, ticker=null;
+
+f.onchange=()=>{
+  selected=f.files&&f.files[0];
+  if(!selected)return;
+  chosen.textContent="Selected: "+selected.name;
+  if(previewUrl)URL.revokeObjectURL(previewUrl);
+  previewUrl=URL.createObjectURL(selected);
+  preview.src=previewUrl;
+  preview.classList.remove("hidden");
+  download.classList.add("hidden");
+  statusEl.textContent="Ready.";
+};
+
+start.onclick=async()=>{
+  if(!selected){statusEl.textContent="Choose a video first.";return}
+  start.disabled=true;
+  download.classList.add("hidden");
+  startedAt=Date.now();
+  statusEl.textContent="Processing locally…";
+  ticker=setInterval(()=>{
+    const s=Math.floor((Date.now()-startedAt)/1000);
+    statusEl.textContent="Processing locally… "+s+"s";
+  },1000);
+
+  const fd=new FormData();
+  fd.append("video",selected,selected.name);
+
+  try{
+    const r=await fetch("/api/remove",{method:"POST",body:fd});
+    if(!r.ok){
+      let msg="Processing failed.";
+      try{const d=await r.json();msg=d.detail||msg}catch(_){}
+      throw new Error(msg);
+    }
+    const blob=await r.blob();
+    download.href=URL.createObjectURL(blob);
+    download.classList.remove("hidden");
+    const s=Math.floor((Date.now()-startedAt)/1000);
+    statusEl.textContent="Done in "+s+"s.";
+  }catch(e){
+    statusEl.textContent="Processing failed:\n"+e.message;
+  }finally{
+    clearInterval(ticker);
+    start.disabled=false;
+  }
+};
+</script>
+</body>
+</html>

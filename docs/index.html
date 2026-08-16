@@ -67,7 +67,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   <div class="pills">
     <span class="pill">Processes on your device</span>
     <span class="pill">Android · iPhone · Mac · Windows</span>
-    <span class="pill alt">Online Beta</span>
+    <span class="pill alt">Online Beta · Engine v2.2</span>
   </div>
 </header>
 
@@ -503,7 +503,7 @@ async function ensureFFmpeg(){
   setProgress(2,"Loading the browser video engine (~30 MB)…");
   ffmpeg=new FFmpeg();
   ffmpeg.on("log",({message})=>console.debug("[ffmpeg]",message));
-  const base="https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
+  const base="https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm";
   const classWorkerURL = new URL("./ffmpeg-worker.js", window.location.href).href;
   await ffmpeg.load({
     coreURL:await toBlobURL(`${base}/ffmpeg-core.js`,"text/javascript"),

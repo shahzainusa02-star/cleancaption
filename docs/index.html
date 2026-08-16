@@ -67,7 +67,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   <div class="pills">
     <span class="pill">Processes on your device</span>
     <span class="pill">Android · iPhone · Mac · Windows</span>
-    <span class="pill alt">Online Beta · Engine v2.2</span>
+    <span class="pill alt">Online Beta · Engine v3</span>
   </div>
 </header>
 
@@ -114,7 +114,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   </div>
   <div class="progress"><div id="progressBar" class="bar"></div></div>
   <div id="status" class="status">Ready.</div>
-  <div class="warning">Browser processing uses your phone/computer memory and can be slower than a desktop app. Keep this tab open while it works. For this first beta, short videos are recommended.</div>
+  <div class="warning">CaptionClean v3 uses the browser's native WebCodecs video engine instead of ffmpeg.wasm. Keep this tab open while it processes. Short videos are still recommended while the Online Beta is being tested.</div>
 </section>
 
 <section id="resultCard" class="card hidden">
@@ -130,13 +130,21 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
 
 <footer>
   CaptionClean Online Beta · Your selected video is processed in this browser session.<br>
-  The page loads browser video-processing libraries from public CDNs; your selected video is not intentionally uploaded by CaptionClean.
+  The page loads browser media-processing libraries from public CDNs; your selected video is processed locally and is not intentionally uploaded by CaptionClean.
 </footer>
 </main>
 
 <script type="module">
-import { FFmpeg } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/index.js";
-import { fetchFile, toBlobURL } from "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.2/dist/esm/index.js";
+import {
+  Input,
+  Output,
+  Conversion,
+  ALL_FORMATS,
+  BlobSource,
+  Mp4OutputFormat,
+  BufferTarget,
+  Quality
+} from "https://cdn.jsdelivr.net/npm/mediabunny@1.54.0/+esm";
 
 const $ = (id) => document.getElementById(id);
 const fileInput = $("videoFile");
@@ -161,13 +169,9 @@ let selectedFile = null;
 let inputURL = null;
 let outputURL = null;
 let deferredInstallPrompt = null;
-let ffmpeg = null;
-let ffmpegLoaded = false;
 let cvInstance = null;
 
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-const TARGET_FPS = isMobile ? 24 : 30;
-const CHUNK_SECONDS = isMobile ? 3 : 4;
 
 function mode(){
   return document.querySelector('input[name="mode"]:checked').value;
@@ -498,153 +502,146 @@ async function inpaintImage(img,box){
   }
 }
 
-async function ensureFFmpeg(){
-  if(ffmpegLoaded) return;
-  setProgress(2,"Loading the browser video engine (~30 MB)…");
-  ffmpeg=new FFmpeg();
-  ffmpeg.on("log",({message})=>console.debug("[ffmpeg]",message));
-  const base="https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm";
-  const classWorkerURL = new URL("./ffmpeg-worker.js", window.location.href).href;
-  await ffmpeg.load({
-    coreURL:await toBlobURL(`${base}/ffmpeg-core.js`,"text/javascript"),
-    wasmURL:await toBlobURL(`${base}/ffmpeg-core.wasm`,"application/wasm"),
-    classWorkerURL
-  });
-  ffmpegLoaded=true;
+function ensureWebCodecs(){
+  if(!("VideoDecoder" in window) || !("VideoEncoder" in window)){
+    throw new Error("This browser does not support the WebCodecs video engine. Update Chrome, Edge, or Safari and try again.");
+  }
 }
 
-async function safeDeleteFile(name){try{await ffmpeg.deleteFile(name)}catch(_){}}
-async function safeDeleteDir(name){try{await ffmpeg.deleteDir(name)}catch(_){}}
+async function processVideoSample(sample, state){
+  if(!workCanvas.width || workCanvas.width!==sample.displayWidth || workCanvas.height!==sample.displayHeight){
+    workCanvas.width=sample.displayWidth;
+    workCanvas.height=sample.displayHeight;
+  }
 
-async function processFrameFile(path,prevBoxState){
-  const bytes=await ffmpeg.readFile(path);
-  const bmp=await createImageBitmap(new Blob([bytes.buffer],{type:"image/png"}));
-  workCanvas.width=bmp.width;workCanvas.height=bmp.height;
   const ctx=workCanvas.getContext("2d",{willReadFrequently:true});
-  ctx.drawImage(bmp,0,0);bmp.close();
-  let img=ctx.getImageData(0,0,workCanvas.width,workCanvas.height);
+  sample.draw(ctx,0,0);
 
+  let img=ctx.getImageData(0,0,workCanvas.width,workCanvas.height);
   let box;
+
   if(mode()==="manual"){
     box=currentManualBox(img.width,img.height);
   }else{
     box=detectCaptionBox(img);
-    if(!box && prevBoxState.box && prevBoxState.misses<2){
-      box=prevBoxState.box;
-      prevBoxState.misses++;
+    if(!box && state.previousBox && state.misses<2){
+      box=state.previousBox;
+      state.misses++;
     }else if(box){
-      prevBoxState.box=box;
-      prevBoxState.misses=0;
+      state.previousBox=box;
+      state.misses=0;
     }else{
-      prevBoxState.box=null;
-      prevBoxState.misses++;
+      state.previousBox=null;
+      state.misses++;
     }
   }
 
   if(box){
     img=await inpaintImage(img,box);
     ctx.putImageData(img,0,0);
-    const blob=await new Promise((resolve,reject)=>workCanvas.toBlob(b=>b?resolve(b):reject(new Error("Could not encode a processed frame.")),"image/png"));
-    await ffmpeg.writeFile(path,new Uint8Array(await blob.arrayBuffer()));
   }
+
+  state.frames++;
+  // Give the UI thread regular opportunities to repaint and remain responsive.
+  if(state.frames%2===0){
+    await new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+  }
+
+  return workCanvas;
 }
 
 processBtn.addEventListener("click",async()=>{
   if(!selectedFile)return;
-  processBtn.disabled=true;checkBtn.disabled=true;resultCard.classList.add("hidden");
-  setProgress(1,"Preparing…");
+
+  processBtn.disabled=true;
+  checkBtn.disabled=true;
+  resultCard.classList.add("hidden");
+  statusEl.classList.remove("error");
+  setProgress(1,"Starting the lightweight browser video engine…");
 
   try{
-    if(selectedFile.size>350*1024*1024) throw new Error("For this Online Beta, choose a video smaller than 350 MB.");
-    await ensureFFmpeg();
-    await ensureCV(); // optional; fallback is available if photo/inpaint isn't exposed.
+    ensureWebCodecs();
 
-    const inputName="input"+(selectedFile.name.match(/\.[a-z0-9]+$/i)?.[0]||".mp4");
-    await safeDeleteFile(inputName);
-    await ffmpeg.writeFile(inputName,await fetchFile(selectedFile));
+    if(selectedFile.size>750*1024*1024){
+      throw new Error("For this Online Beta, choose a video smaller than 750 MB.");
+    }
 
-    const duration=sourceVideo.duration;
-    if(!Number.isFinite(duration)||duration<=0) throw new Error("Could not read video duration.");
-    const chunks=Math.ceil(duration/CHUNK_SECONDS);
-    const segmentNames=[];
-    let previous={box:null,misses:0};
+    const input=new Input({
+      formats:ALL_FORMATS,
+      source:new BlobSource(selectedFile)
+    });
 
-    for(let ci=0;ci<chunks;ci++){
-      const start=ci*CHUNK_SECONDS;
-      const dur=Math.min(CHUNK_SECONDS,duration-start);
-      const dir=`frames_${ci}`;
-      try{await ffmpeg.createDir(dir)}catch(_){}
+    if(!(await input.canRead())){
+      throw new Error("CaptionClean could not read this video format in this browser.");
+    }
 
-      setProgress(5+(ci/chunks)*80,`Chunk ${ci+1}/${chunks}: decoding video frames…`);
-      await ffmpeg.exec([
-        "-hide_banner","-loglevel","error",
-        "-ss",start.toFixed(3),"-t",dur.toFixed(3),"-i",inputName,
-        "-vf",`fps=${TARGET_FPS}`,
-        `${dir}/%06d.png`
-      ]);
+    const videoTrack=await input.getPrimaryVideoTrack();
+    if(!videoTrack){
+      throw new Error("No video track was found.");
+    }
+    if(!(await videoTrack.canDecode())){
+      throw new Error("This browser cannot decode the video's codec.");
+    }
 
-      const entries=(await ffmpeg.listDir(dir))
-        .filter(e=>!e.isDir && /\.png$/i.test(e.name))
-        .map(e=>e.name).sort();
+    const metrics=await videoTrack.computeFrameRateMetrics();
+    const guessedFps=Number(metrics?.bestGuessFrameRate)||30;
+    const targetFps=Math.max(12,Math.min(30,guessedFps));
 
-      if(!entries.length) throw new Error(`No frames were decoded for chunk ${ci+1}.`);
+    const output=new Output({
+      format:new Mp4OutputFormat(),
+      target:new BufferTarget()
+    });
 
-      for(let fi=0;fi<entries.length;fi++){
-        const overall=(ci+fi/entries.length)/chunks;
-        setProgress(8+overall*76,`Removing captions… ${Math.round(overall*100)}%`);
-        await processFrameFile(`${dir}/${entries[fi]}`,previous);
-        if(fi%3===0) await new Promise(r=>setTimeout(r,0));
+    const state={previousBox:null,misses:0,frames:0};
+
+    setProgress(3,"Preparing hardware-accelerated video processing…");
+
+    const conversion=await Conversion.init({
+      input,
+      output,
+      video:{
+        codec:"avc",
+        quality:new Quality("high"),
+        frameRate:targetFps,
+        hardwareAcceleration:"prefer-hardware",
+        forceTranscode:true,
+        process:async(sample)=>processVideoSample(sample,state)
       }
+      // Audio is left unmodified so Mediabunny can copy it directly whenever possible.
+    });
 
-      const seg=`segment_${ci}.mp4`;
-      segmentNames.push(seg);
-      setProgress(12+((ci+.85)/chunks)*78,`Chunk ${ci+1}/${chunks}: encoding MP4…`);
-
-      await ffmpeg.exec([
-        "-hide_banner","-loglevel","error",
-        "-framerate",String(TARGET_FPS),"-i",`${dir}/%06d.png`,
-        "-ss",start.toFixed(3),"-t",dur.toFixed(3),"-i",inputName,
-        "-map","0:v:0","-map","1:a?",
-        "-c:v","libx264","-preset","ultrafast","-crf","21","-pix_fmt","yuv420p",
-        "-c:a","aac","-b:a","128k","-shortest",
-        seg
-      ]);
-
-      for(const name of entries) await safeDeleteFile(`${dir}/${name}`);
-      await safeDeleteDir(dir);
+    if(!conversion.isValid){
+      const reasons=(conversion.discardedTracks||[]).map(x=>x.reason).filter(Boolean);
+      throw new Error("This browser cannot create a compatible MP4 for this video"+(reasons.length?": "+reasons.join(", "):"."));
     }
 
-    setProgress(91,"Joining processed chunks…");
-    const concatText=segmentNames.map(n=>`file '${n}'`).join("\n");
-    await ffmpeg.writeFile("concat.txt",new TextEncoder().encode(concatText));
-    await safeDeleteFile("CaptionClean-output.mp4");
+    conversion.onProgress=(p)=>{
+      const pct=5+Math.max(0,Math.min(1,p))*90;
+      setProgress(pct,`Removing captions… ${Math.round(p*100)}%`);
+    };
 
-    if(segmentNames.length===1){
-      await ffmpeg.exec(["-hide_banner","-loglevel","error","-i",segmentNames[0],"-c","copy","-movflags","+faststart","CaptionClean-output.mp4"]);
-    }else{
-      await ffmpeg.exec(["-hide_banner","-loglevel","error","-f","concat","-safe","0","-i","concat.txt","-c","copy","-movflags","+faststart","CaptionClean-output.mp4"]);
+    await conversion.execute();
+
+    const buffer=output.target.buffer;
+    if(!buffer || buffer.byteLength<1024){
+      throw new Error("The browser did not create a valid output video.");
     }
 
-    const out=await ffmpeg.readFile("CaptionClean-output.mp4");
     if(outputURL)URL.revokeObjectURL(outputURL);
-    outputURL=URL.createObjectURL(new Blob([out.buffer],{type:"video/mp4"}));
+    outputURL=URL.createObjectURL(new Blob([buffer],{type:"video/mp4"}));
     resultVideo.src=outputURL;
     downloadBtn.href=outputURL;
     resultCard.classList.remove("hidden");
     resultCard.scrollIntoView({behavior:"smooth",block:"start"});
-    setProgress(100,"Done. Preview the result, then download the cleaned MP4.");
-
-    for(const s of segmentNames) await safeDeleteFile(s);
-    await safeDeleteFile("concat.txt");
-    await safeDeleteFile("CaptionClean-output.mp4");
-    await safeDeleteFile(inputName);
+    setProgress(100,`Done. Processed ${state.frames} video frames. Preview the result, then download the cleaned MP4.`);
   }catch(e){
     console.error(e);
     statusEl.classList.add("error");
     statusEl.textContent="Processing failed: "+(e?.message||String(e))+
-      "\n\nIf this happened on a phone, try a shorter video or close other browser tabs.";
+      "\n\nCaptionClean v3 no longer uses the heavy ffmpeg.wasm engine. If this still fails, send a screenshot of this exact message.";
   }finally{
-    processBtn.disabled=false;checkBtn.disabled=false;
+    processBtn.disabled=false;
+    checkBtn.disabled=false;
   }
 });
 

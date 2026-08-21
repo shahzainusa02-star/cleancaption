@@ -1,7 +1,7 @@
 // CaptionClean same-origin FFmpeg class worker.
 // Compatible with @ffmpeg/ffmpeg 0.12.x message protocol.
 
-const CORE_URL = new URL("./ffmpeg-core.js", self.location.href).href;
+const CORE_URL = new URL("./ffmpeg-core.js?v=modulefix-1", self.location.href).href;
 
 const FFMessageType = {
   LOAD: "LOAD",

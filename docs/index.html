@@ -503,15 +503,15 @@ async function ensureFFmpeg(){
   setProgress(2,"Loading the browser video engine (~30 MB)…");
   ffmpeg=new FFmpeg();
   ffmpeg.on("log",({message})=>console.debug("[ffmpeg]",message));
-  // Keep the large FFmpeg core on this same GitHub Pages site. Loading the
-  // ESM core through a temporary CDN blob made the class worker fail with
-  // "failed to import ffmpeg-core.js" in Chrome.
-  const coreURL = new URL("./ffmpeg-core.js", window.location.href).href;
+  // The FFmpeg class worker is a module worker. Serve its matching ESM core
+  // from this same GitHub Pages site instead of importing it through a
+  // temporary cross-context blob URL.
+  const coreURL = new URL("./ffmpeg-core.js?v=modulefix-1", window.location.href).href;
   const wasmURL = await toBlobURL(
-    "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd/ffmpeg-core.wasm",
+    "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm",
     "application/wasm"
   );
-  const classWorkerURL = new URL("./ffmpeg-worker.js", window.location.href).href;
+  const classWorkerURL = new URL("./ffmpeg-worker.js?v=modulefix-1", window.location.href).href;
   await ffmpeg.load({
     coreURL,
     wasmURL,
@@ -679,7 +679,7 @@ installBtn.addEventListener("click",async()=>{
 });
 
 if("serviceWorker" in navigator){
-  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js").catch(console.warn));
+  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=modulefix-1").catch(console.warn));
 }
 </script>
 </body>

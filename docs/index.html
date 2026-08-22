@@ -93,7 +93,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
 
   <div id="manualBox" class="manual hidden">
     <b>Manual Caption Areas</b>
-    <div class="small" style="margin-top:6px">Pause the video and drag a box over each caption location. Every finished box stays selected, so you can add multiple areas.</div>
+    <div class="small" style="margin-top:6px">Click or tap the video to play or pause it. Drag a box over each caption location. Every finished box stays selected, so you can add multiple areas.</div>
     <div id="manualAreaCount" class="small" style="margin-top:8px">No manual areas selected.</div>
     <div class="row" style="margin-top:10px">
       <button id="undoAreaBtn" class="secondary" type="button">Undo Last Area</button>
@@ -201,6 +201,7 @@ let manualNorms = [];
 let manualDraft = null;
 let drawingManual = false;
 let manualStart = null;
+let manualMoved = false;
 
 function currentManualBoxes(w,h){
   return manualNorms.map(([l,t,r,b])=>[
@@ -227,6 +228,7 @@ overlay.addEventListener("pointerdown",(ev)=>{
   ev.preventDefault();
   overlay.setPointerCapture?.(ev.pointerId);
   drawingManual = true;
+  manualMoved = false;
   manualStart = overlayPointToNormalized(ev);
   manualDraft = [manualStart[0],manualStart[1],manualStart[0],manualStart[1]];
   drawEditorOverlay();
@@ -236,6 +238,7 @@ overlay.addEventListener("pointermove",(ev)=>{
   if(!drawingManual || mode()!=="manual") return;
   ev.preventDefault();
   const p = overlayPointToNormalized(ev);
+  if(Math.hypot(p[0]-manualStart[0],p[1]-manualStart[1])>0.008)manualMoved=true;
   manualDraft = [
     Math.min(manualStart[0],p[0]),
     Math.min(manualStart[1],p[1]),
@@ -245,11 +248,27 @@ overlay.addEventListener("pointermove",(ev)=>{
   drawEditorOverlay();
 });
 
-function finishManualDraw(ev){
+async function finishManualDraw(ev){
   if(!drawingManual) return;
   drawingManual = false;
   try{overlay.releasePointerCapture?.(ev.pointerId)}catch(_){}
   const [l,t,r,b] = manualDraft;
+  if(ev.type==="pointerup"&&!manualMoved){
+    manualDraft = null;
+    if(sourceVideo.paused){
+      try{
+        await sourceVideo.play();
+        detectMessage.textContent = "Video playing. Click or tap the video again to pause; drag to add a caption area.";
+      }catch(_){
+        detectMessage.textContent = "The browser could not start playback. Use the video play control and try again.";
+      }
+    }else{
+      sourceVideo.pause();
+      detectMessage.textContent = "Video paused. Drag over each caption area, or click the video to continue playing.";
+    }
+    drawEditorOverlay();
+    return;
+  }
   if((r-l)<0.03 || (b-t)<0.02){
     detectMessage.textContent = "Selection was too small and was not added. Drag a larger box around the full caption.";
   }else{
@@ -955,7 +974,7 @@ installBtn.addEventListener("click",async()=>{
 });
 
 if("serviceWorker" in navigator){
-  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=controls-1").catch(console.warn));
+  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=controls-2").catch(console.warn));
 }
 </script>
 </body>

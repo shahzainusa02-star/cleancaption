@@ -13,6 +13,7 @@ This package keeps the original interface and upgrades the browser-only caption-
 - Preserves the source frame rate and primary audio.
 - Adds a real Cancel Processing button that releases conversion resources.
 - Allows multiple numbered manual caption areas, with Undo Last and Clear All controls.
+- Lets a simple click or tap play/pause the video in Manual mode, while dragging still creates a caption area.
 - Uses an OffscreenCanvas when available and no longer waits for `requestAnimationFrame`, so processing can continue when another browser tab is active.
 - Warns before closing, reloading, or navigating away during processing.
 

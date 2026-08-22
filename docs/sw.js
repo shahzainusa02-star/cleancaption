@@ -1,4 +1,4 @@
-const CACHE="captionclean-online-v2-5-fmm-1";
+const CACHE="captionclean-online-v2-5-1-controls-1";
 const SHELL=["./","./index.html","./manifest.webmanifest","./icon-192.png","./icon-512.png"];
 self.addEventListener("install",event=>{
   event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)));

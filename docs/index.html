@@ -66,7 +66,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   <div class="pills">
     <span class="pill">Processes on your device</span>
     <span class="pill">Android · iPhone · Mac · Windows</span>
-    <span class="pill alt">Online Beta · Engine v2.2</span>
+    <span class="pill alt">Online Beta · Engine v2.5</span>
   </div>
 </header>
 
@@ -113,7 +113,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   </div>
   <div class="progress"><div id="progressBar" class="bar"></div></div>
   <div id="status" class="status">Ready.</div>
-  <div class="warning">CaptionClean now uses a lightweight browser video engine. Keep this tab open while it works. On older computers, close other tabs and start with a short video.</div>
+  <div class="warning">Engine v2.5 reconstructs inward from the clean edge of each caption-shaped mask. It avoids the broad blur bands and temporal dark patches from earlier tests. Keep this tab open while it works.</div>
 </section>
 
 <section id="resultCard" class="card hidden">
@@ -436,46 +436,224 @@ function detectCaptionBox(img){
   ];
 }
 
-function inpaintCanvasRegion(ctx,frameW,frameH,box){
-  if(!box)return;
+function pixelLuma(data,index){
+  return (data[index]*77+data[index+1]*150+data[index+2]*29)>>8;
+}
 
+function inpaintCaptionPixels(img,box){
+  if(!box)return 0;
+  const {data,width:frameW,height:frameH}=img;
   let [bx0,by0,bx1,by1]=box.map(Math.round);
-  bx0=Math.max(1,Math.min(frameW-2,bx0));
-  bx1=Math.max(1,Math.min(frameW-2,bx1));
-  by0=Math.max(1,Math.min(frameH-2,by0));
-  by1=Math.max(1,Math.min(frameH-2,by1));
-  if(bx1<=bx0||by1<=by0)return;
+  bx0=Math.max(2,Math.min(frameW-3,bx0));
+  bx1=Math.max(2,Math.min(frameW-3,bx1));
+  by0=Math.max(2,Math.min(frameH-3,by0));
+  by1=Math.max(2,Math.min(frameH-3,by1));
+  if(bx1<=bx0||by1<=by0)return 0;
 
-  const pad=Math.max(5,Math.round(Math.min(frameW,frameH)*.01));
+  const scale=Math.max(.65,Math.min(2.5,Math.min(frameW/478,frameH/850)));
+  const coreRadius=Math.max(3,Math.round(4*scale));
+  const outerRadius=Math.max(coreRadius+2,Math.round(6*scale));
+  const contrastRadius=Math.max(2,Math.round(4*scale));
+  const fillRadius=Math.max(2,Math.round(3*scale));
+  const pad=outerRadius+fillRadius+3;
   const rx0=Math.max(1,bx0-pad),ry0=Math.max(1,by0-pad);
   const rx1=Math.min(frameW-2,bx1+pad),ry1=Math.min(frameH-2,by1+pad);
   const rw=rx1-rx0+1,rh=ry1-ry0+1;
-  const roi=ctx.getImageData(rx0,ry0,rw,rh);
-  const data=roi.data;
-  const src=new Uint8ClampedArray(data);
-  const lx=Math.max(1,bx0-rx0),rx=Math.min(rw-2,bx1-rx0);
-  const ty=Math.max(1,by0-ry0),by=Math.min(rh-2,by1-ry0);
-  const boxW=Math.max(1,rx-lx),boxH=Math.max(1,by-ty);
+  const seeds=new Uint8Array(rw*rh);
+  let seedCount=0;
 
-  for(let y=ty;y<=by;y++){
-    const fy=(y-ty)/boxH;
-    for(let x=lx;x<=rx;x++){
-      const fx=(x-lx)/boxW;
-      const i=(y*rw+x)*4;
-      const top=((ty-1)*rw+x)*4,bottom=((by+1)*rw+x)*4;
-      const left=(y*rw+(lx-1))*4,right=(y*rw+(rx+1))*4;
-      const dy=Math.min(fy,1-fy),dx=Math.min(fx,1-fx);
-      const sum=Math.max(.0001,dx+dy);
-      const verticalWeight=dx/sum,horizontalWeight=dy/sum;
-      for(let c=0;c<3;c++){
-        const vertical=src[top+c]*(1-fy)+src[bottom+c]*fy;
-        const horizontal=src[left+c]*(1-fx)+src[right+c]*fx;
-        data[i+c]=Math.round(vertical*verticalWeight+horizontal*horizontalWeight);
+  const isDarkComparedWith=(x,y,lightness)=>{
+    if(x<0||x>=frameW||y<0||y>=frameH)return false;
+    return pixelLuma(data,(y*frameW+x)*4)<lightness-48;
+  };
+
+  // Caption fills are bright/neutral (or vivid) and normally have a dark
+  // outline on two opposing sides. Requiring that outline prevents large
+  // white objects behind the caption from being erased.
+  for(let y=by0;y<=by1;y++){
+    for(let x=bx0;x<=bx1;x++){
+      const gi=(y*frameW+x)*4;
+      const r=data[gi],g=data[gi+1],b=data[gi+2];
+      const max=Math.max(r,g,b),min=Math.min(r,g,b);
+      const lightness=pixelLuma(data,gi);
+      const brightNeutral=lightness>=174&&(max-min)<=82;
+      const vivid=max>=205&&(max-min)>=70&&lightness>=120;
+      if(!brightNeutral&&!vivid)continue;
+
+      let left=false,right=false,up=false,down=false;
+      let upLeft=false,upRight=false,downLeft=false,downRight=false;
+      for(let d=1;d<=contrastRadius;d++){
+        left ||=isDarkComparedWith(x-d,y,lightness);
+        right||=isDarkComparedWith(x+d,y,lightness);
+        up   ||=isDarkComparedWith(x,y-d,lightness);
+        down ||=isDarkComparedWith(x,y+d,lightness);
+        if(d<=Math.ceil(contrastRadius*.75)){
+          upLeft   ||=isDarkComparedWith(x-d,y-d,lightness);
+          upRight  ||=isDarkComparedWith(x+d,y-d,lightness);
+          downLeft ||=isDarkComparedWith(x-d,y+d,lightness);
+          downRight||=isDarkComparedWith(x+d,y+d,lightness);
+        }
       }
-      data[i+3]=255;
+      const darkDirections=[left,right,up,down,upLeft,upRight,downLeft,downRight]
+        .reduce((sum,value)=>sum+(value?1:0),0);
+      if(!((left&&right)||(up&&down)||darkDirections>=3))continue;
+
+      const local=(y-ry0)*rw+(x-rx0);
+      seeds[local]=1;
+      seedCount++;
     }
   }
-  ctx.putImageData(roi,rx0,ry0);
+
+  if(seedCount<3)return 0;
+
+  // Fast chamfer distance transform: grow a feathered mask around each
+  // detected caption-fill pixel without repeatedly scanning a large radius.
+  const INF=65535;
+  const distance=new Uint16Array(rw*rh);
+  distance.fill(INF);
+  for(let i=0;i<seeds.length;i++)if(seeds[i])distance[i]=0;
+  for(let y=0;y<rh;y++){
+    for(let x=0;x<rw;x++){
+      const i=y*rw+x;
+      let best=distance[i];
+      if(x>0)best=Math.min(best,distance[i-1]+10);
+      if(y>0){
+        best=Math.min(best,distance[i-rw]+10);
+        if(x>0)best=Math.min(best,distance[i-rw-1]+14);
+        if(x<rw-1)best=Math.min(best,distance[i-rw+1]+14);
+      }
+      distance[i]=Math.min(INF,best);
+    }
+  }
+  for(let y=rh-1;y>=0;y--){
+    for(let x=rw-1;x>=0;x--){
+      const i=y*rw+x;
+      let best=distance[i];
+      if(x<rw-1)best=Math.min(best,distance[i+1]+10);
+      if(y<rh-1){
+        best=Math.min(best,distance[i+rw]+10);
+        if(x>0)best=Math.min(best,distance[i+rw-1]+14);
+        if(x<rw-1)best=Math.min(best,distance[i+rw+1]+14);
+      }
+      distance[i]=Math.min(INF,best);
+    }
+  }
+
+  const coverage=new Uint8Array(rw*rh);
+  const coreDistance=coreRadius*10,outerDistance=outerRadius*10;
+  let maskedCount=0;
+  for(let i=0;i<distance.length;i++){
+    const d=distance[i];
+    if(d>outerDistance)continue;
+    coverage[i]=d<=coreDistance
+      ?255
+      :Math.max(1,Math.round(255*(outerDistance-d)/Math.max(1,outerDistance-coreDistance)));
+    maskedCount++;
+  }
+  if(!maskedCount)return 0;
+
+  // Fast-marching inpainting: start at the clean boundary and reconstruct
+  // inward in distance order. Only already-clean or already-reconstructed
+  // pixels can contribute, so caption pixels cannot leak back into the fill.
+  const insideDistance=new Uint16Array(rw*rh);
+  const known=new Uint8Array(rw*rh);
+  insideDistance.fill(INF);
+  for(let i=0;i<coverage.length;i++){
+    if(!coverage[i]){insideDistance[i]=0;known[i]=1;}
+  }
+  for(let y=0;y<rh;y++){
+    for(let x=0;x<rw;x++){
+      const i=y*rw+x;
+      if(!coverage[i])continue;
+      let best=insideDistance[i];
+      if(x>0)best=Math.min(best,insideDistance[i-1]+10);
+      if(y>0){
+        best=Math.min(best,insideDistance[i-rw]+10);
+        if(x>0)best=Math.min(best,insideDistance[i-rw-1]+14);
+        if(x<rw-1)best=Math.min(best,insideDistance[i-rw+1]+14);
+      }
+      insideDistance[i]=Math.min(INF,best);
+    }
+  }
+  for(let y=rh-1;y>=0;y--){
+    for(let x=rw-1;x>=0;x--){
+      const i=y*rw+x;
+      if(!coverage[i])continue;
+      let best=insideDistance[i];
+      if(x<rw-1)best=Math.min(best,insideDistance[i+1]+10);
+      if(y<rh-1){
+        best=Math.min(best,insideDistance[i+rw]+10);
+        if(x>0)best=Math.min(best,insideDistance[i+rw-1]+14);
+        if(x<rw-1)best=Math.min(best,insideDistance[i+rw+1]+14);
+      }
+      insideDistance[i]=Math.min(INF,best);
+    }
+  }
+
+  const work=new Float32Array(rw*rh*3);
+  const points=[];
+  for(let y=0;y<rh;y++){
+    for(let x=0;x<rw;x++){
+      const local=y*rw+x;
+      const global=((ry0+y)*frameW+(rx0+x))*4;
+      const wi=local*3;
+      work[wi]=data[global];
+      work[wi+1]=data[global+1];
+      work[wi+2]=data[global+2];
+      if(coverage[local])points.push(local);
+    }
+  }
+  points.sort((a,b)=>insideDistance[a]-insideDistance[b]);
+
+  const radiusSquared=fillRadius*fillRadius;
+  for(const local of points){
+    const y=Math.floor(local/rw),x=local-y*rw;
+    const leftIndex=y*rw+Math.max(0,x-1);
+    const rightIndex=y*rw+Math.min(rw-1,x+1);
+    const upIndex=Math.max(0,y-1)*rw+x;
+    const downIndex=Math.min(rh-1,y+1)*rw+x;
+    const normalX=(insideDistance[rightIndex]-insideDistance[leftIndex])/10;
+    const normalY=(insideDistance[downIndex]-insideDistance[upIndex])/10;
+    let total=0,red=0,green=0,blue=0;
+    const y0=Math.max(0,y-fillRadius),y1=Math.min(rh-1,y+fillRadius);
+    const x0=Math.max(0,x-fillRadius),x1=Math.min(rw-1,x+fillRadius);
+    for(let sourceY=y0;sourceY<=y1;sourceY++){
+      for(let sourceX=x0;sourceX<=x1;sourceX++){
+        const source=sourceY*rw+sourceX;
+        if(!known[source])continue;
+        const dx=x-sourceX,dy=y-sourceY;
+        const squared=dx*dx+dy*dy;
+        if(!squared||squared>radiusSquared)continue;
+        const direction=Math.abs(dx*normalX+dy*normalY)+.05;
+        const level=1/(1+Math.abs(insideDistance[source]-insideDistance[local])/10);
+        const weight=direction*level/(squared*Math.sqrt(squared));
+        const sourcePixel=source*3;
+        red+=work[sourcePixel]*weight;
+        green+=work[sourcePixel+1]*weight;
+        blue+=work[sourcePixel+2]*weight;
+        total+=weight;
+      }
+    }
+    if(total){
+      const wi=local*3;
+      work[wi]=red/total;
+      work[wi+1]=green/total;
+      work[wi+2]=blue/total;
+    }
+    known[local]=1;
+  }
+
+  for(const local of points){
+    const y=Math.floor(local/rw),x=local-y*rw;
+    const alpha=coverage[local]/255;
+    const global=((ry0+y)*frameW+(rx0+x))*4;
+    const wi=local*3;
+    data[global]=Math.round(data[global]*(1-alpha)+work[wi]*alpha);
+    data[global+1]=Math.round(data[global+1]*(1-alpha)+work[wi+1]*alpha);
+    data[global+2]=Math.round(data[global+2]*(1-alpha)+work[wi+2]*alpha);
+    data[global+3]=255;
+  }
+  return maskedCount;
 }
 
 function ensureWebCodecs(){
@@ -492,12 +670,12 @@ async function processVideoSample(sample,state){
 
   const ctx=workCanvas.getContext("2d",{willReadFrequently:true});
   sample.draw(ctx,0,0);
+  const img=ctx.getImageData(0,0,workCanvas.width,workCanvas.height);
   let box;
 
   if(mode()==="manual"){
     box=currentManualBox(workCanvas.width,workCanvas.height);
   }else{
-    const img=ctx.getImageData(0,0,workCanvas.width,workCanvas.height);
     box=detectCaptionBox(img);
     if(!box&&state.previousBox&&state.misses<2){
       box=state.previousBox;
@@ -511,7 +689,14 @@ async function processVideoSample(sample,state){
     }
   }
 
-  if(box)inpaintCanvasRegion(ctx,workCanvas.width,workCanvas.height,box);
+  if(box){
+    const masked=inpaintCaptionPixels(img,box);
+    if(masked){
+      ctx.putImageData(img,0,0);
+      state.maskedPixels+=masked;
+      state.cleanedFrames++;
+    }
+  }
   state.frames++;
 
   // Give Chrome a chance to repaint after every frame on older computers.
@@ -551,7 +736,7 @@ processBtn.addEventListener("click",async()=>{
       format:new Mp4OutputFormat(),
       target:new BufferTarget()
     });
-    const state={previousBox:null,misses:0,frames:0};
+    const state={previousBox:null,misses:0,frames:0,cleanedFrames:0,maskedPixels:0};
     setProgress(3,"Preparing hardware-accelerated video processing…");
 
     const conversion=await Conversion.init({
@@ -590,7 +775,7 @@ processBtn.addEventListener("click",async()=>{
     downloadBtn.href=outputURL;
     resultCard.classList.remove("hidden");
     resultCard.scrollIntoView({behavior:"smooth",block:"start"});
-    setProgress(100,`Done. Processed ${state.frames} frames with original FPS; audio is kept when present. Preview the result, then download the cleaned MP4.`);
+    setProgress(100,`Done. Processed ${state.frames} frames and cleaned detected caption pixels on ${state.cleanedFrames} frames. Original FPS and audio are preserved. Preview the result, then download the cleaned MP4.`);
   }catch(e){
     console.error(e);
     statusEl.classList.add("error");
@@ -626,7 +811,7 @@ installBtn.addEventListener("click",async()=>{
 });
 
 if("serviceWorker" in navigator){
-  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=lightweight-1").catch(console.warn));
+  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=fmm-1").catch(console.warn));
 }
 </script>
 </body>

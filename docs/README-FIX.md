@@ -1,14 +1,20 @@
-# CaptionClean Online v2.2 — Lightweight Final Fix
+# CaptionClean Online v2.5 — Browser Fast-Marching Upgrade
 
-This package keeps the original v2.2 interface and replaces only the video-processing engine.
+This package keeps the original interface and upgrades the browser-only caption-removal engine.
 
-## Fixed
+## Improvements
 
-The earlier build first failed while importing `ffmpeg-core.js`. After that import was repaired, its roughly 30 MB WebAssembly engine could still make Chrome show **Page Unresponsive** on older computers.
+- Keeps the lightweight WebCodecs engine, so the old FFmpeg WebAssembly freeze does not return.
+- Detects the bright caption fill and its dark outline inside the caption area.
+- Uses a tight feathered mask around the caption letters.
+- Reconstructs inward from the clean edge in distance order.
+- Prevents caption pixels from leaking back into the reconstructed area.
+- Avoids broad local averaging, temporal copying, FFmpeg WebAssembly, and OpenCV WebAssembly.
+- Preserves the source frame rate and primary audio.
 
-This build removes FFmpeg WebAssembly and OpenCV. It uses the browser's lightweight WebCodecs engine, keeps Chrome responsive by yielding after each processed frame, exports a high-quality H.264 MP4, preserves the original frame rate, and preserves audio whenever the source audio is compatible with MP4.
+The supplied 478×850, 29.97 FPS original video was processed from beginning to end using the exact JavaScript in this package. The result preserved the original duration, frame rate, and stereo audio and decoded without errors.
 
-The 350 MB file limit remains because the finished video is held in browser memory before download. Short videos are recommended on older computers and phones.
+The automatic detector remains tuned to centered bright captions with a dark outline in the lower-middle area. Use Manual Caption Area when captions appear elsewhere. Because GitHub Pages cannot run a large server-side generative video model, text covering a moving person or detailed object can still leave a small localized soft patch. The 350 MB file limit remains because the finished video is held in browser memory before download.
 
 ## Deploy to GitHub Pages
 
@@ -20,6 +26,6 @@ Replace the old files in the repository's `docs` folder with every file in this 
 - `icon-192.png`
 - `icon-512.png`
 
-The old `ffmpeg-core.js`, `ffmpeg-core.wasm`, and `ffmpeg-worker.js` files are no longer used and may be deleted from `docs`.
+The old `ffmpeg-core.js`, `ffmpeg-core.wasm`, and `ffmpeg-worker.js` files are not used and may be deleted from `docs`.
 
 After GitHub Pages finishes deploying, open the site and press **Command + Shift + R** in Chrome. If Chrome still shows an older status message, test once in an Incognito window.

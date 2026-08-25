@@ -113,7 +113,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   </div>
   <div class="progress"><div id="progressBar" class="bar"></div></div>
   <div id="status" class="status">Ready.</div>
-  <div class="warning">Engine v2.5 reconstructs inward from the clean edge of each caption-shaped mask. Videos longer than one minute are streamed to device storage to prevent phone-memory errors. Keep this tab open while it works.</div>
+  <div class="warning">Engine v2.5 reconstructs inward from the clean edge of each caption-shaped mask. It avoids the broad blur bands and temporal dark patches from earlier tests. Keep this tab open while it works.</div>
 </section>
 
 <section id="resultCard" class="card hidden">
@@ -281,8 +281,8 @@ fileInput.addEventListener("change", async ()=>{
   });
 
   fileInfo.textContent=`${f.name} · ${humanBytes(f.size)} · ${sourceVideo.videoWidth}×${sourceVideo.videoHeight} · ${sourceVideo.duration.toFixed(1)}s`;
-  if(sourceVideo.duration>60){
-    statusEl.textContent="Long-video mode is ready. CaptionClean will stream the cleaned MP4 to device storage while it processes.";
+  if((isMobile && sourceVideo.duration>90) || (!isMobile && sourceVideo.duration>180)){
+    statusEl.textContent="This video is long for browser processing. A shorter clip is recommended for the Online Beta.";
   }
   resizeOverlay();
   drawEditorOverlay();
@@ -676,6 +676,9 @@ function clearOutputPreview(){
 }
 
 async function createOutputDestination(){
+  if(!(sourceVideo.duration>60)){
+    return {target:new BufferTarget(),fileHandle:null,storedInOpfs:false};
+  }
   // Long MP4 files must not be accumulated in one large ArrayBuffer on phones.
   // OPFS keeps the growing file on device storage while frames are processed.
   if(navigator.storage?.getDirectory){
@@ -742,11 +745,12 @@ async function processVideoSample(sample,state){
 
 processBtn.addEventListener("click",async()=>{
   if(!selectedFile)return;
+  const isLongVideo=sourceVideo.duration>60;
   let activeOutput=null;
   processBtn.disabled=true;
   checkBtn.disabled=true;
   resultCard.classList.add("hidden");
-  clearOutputPreview();
+  if(isLongVideo||outputStoredInOpfs)clearOutputPreview();
   statusEl.classList.remove("error");
   setProgress(1,"Starting the lightweight browser video engine…");
 
@@ -779,7 +783,7 @@ processBtn.addEventListener("click",async()=>{
     });
     activeOutput=output;
     const state={previousBox:null,misses:0,frames:0,cleanedFrames:0,maskedPixels:0};
-    setProgress(3,"Preparing compatible video processing for this device…");
+    setProgress(3,"Preparing hardware-accelerated video processing…");
 
     const conversion=await Conversion.init({
       input,
@@ -788,9 +792,7 @@ processBtn.addEventListener("click",async()=>{
       video:{
         codec:"avc",
         quality:new Quality("high"),
-        // Let Chrome choose the working encoder. Forcing hardware can raise a
-        // misleading "network error" on some Samsung/Android devices.
-        hardwareAcceleration:"no-preference",
+        hardwareAcceleration:"prefer-hardware",
         forceTranscode:true,
         process:async(sample)=>processVideoSample(sample,state)
       }
@@ -808,11 +810,19 @@ processBtn.addEventListener("click",async()=>{
     };
     await conversion.execute();
 
-    const resultFile=outputFileHandle
-      ?await outputFileHandle.getFile()
-      :new Blob([output.target.buffer],{type:"video/mp4"});
-    if(!resultFile||resultFile.size<1024){
-      throw new Error("The browser did not create a valid output video.");
+    let resultFile;
+    if(outputFileHandle){
+      resultFile=await outputFileHandle.getFile();
+      if(!resultFile||resultFile.size<1024){
+        throw new Error("The browser did not create a valid output video.");
+      }
+    }else{
+      const buffer=output.target.buffer;
+      if(!buffer||buffer.byteLength<1024){
+        throw new Error("The browser did not create a valid output video.");
+      }
+      if(outputURL)URL.revokeObjectURL(outputURL);
+      resultFile=new Blob([buffer],{type:"video/mp4"});
     }
 
     outputURL=URL.createObjectURL(resultFile);
@@ -825,11 +835,11 @@ processBtn.addEventListener("click",async()=>{
   }catch(e){
     console.error(e);
     try{
-      if(activeOutput&&!['canceled','finalized'].includes(activeOutput.state))await activeOutput.cancel();
+      if(outputStoredInOpfs&&activeOutput&&!['canceled','finalized'].includes(activeOutput.state))await activeOutput.cancel();
     }catch(_){}
     statusEl.classList.add("error");
     statusEl.textContent="Processing failed: "+(e?.message||String(e))+
-      "\n\nKeep this tab open, make sure the phone has free storage, and send a screenshot if it still fails.";
+      "\n\nClose other tabs and try a shorter video. If it still fails, send a screenshot of this exact message.";
   }finally{
     processBtn.disabled=false;
     checkBtn.disabled=false;
@@ -838,7 +848,7 @@ processBtn.addEventListener("click",async()=>{
 
 $("newBtn").addEventListener("click",()=>{
   resultCard.classList.add("hidden");
-  clearOutputPreview();
+  if(outputStoredInOpfs)clearOutputPreview();
   fileInput.value="";
   selectedFile=null;
   sourceVideo.removeAttribute("src");sourceVideo.load();
@@ -861,7 +871,7 @@ installBtn.addEventListener("click",async()=>{
 });
 
 if("serviceWorker" in navigator){
-  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=fmm-3").catch(console.warn));
+  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=fmm-4").catch(console.warn));
 }
 </script>
 </body>

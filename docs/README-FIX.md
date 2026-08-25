@@ -11,7 +11,6 @@ This package keeps the original interface and upgrades the browser-only caption-
 - Prevents caption pixels from leaking back into the reconstructed area.
 - Avoids broad local averaging, temporal copying, FFmpeg WebAssembly, and OpenCV WebAssembly.
 - Preserves the source frame rate and primary audio.
-- Uses browser-compatible encoder selection instead of forcing hardware H.264, preventing the misleading `network error` seen on some Samsung and Android phones.
 - Streams the growing cleaned MP4 into the browser's device storage instead of keeping the entire export in RAM. This prevents the misleading `network error` caused by memory exhaustion on videos longer than one minute.
 
 The supplied 478×850, 29.97 FPS original video was processed from beginning to end using the exact JavaScript in this package. The result preserved the original duration, frame rate, and stereo audio and decoded without errors.

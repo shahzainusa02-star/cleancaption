@@ -33,7 +33,7 @@ video{width:100%;max-height:570px;background:#000;border-radius:14px;display:blo
 .previewWrap{position:relative;margin-top:14px}
 canvas.overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;border-radius:14px}canvas.overlay.manual-draw{pointer-events:auto;cursor:crosshair;touch-action:none}
 button,a.button{border:0;border-radius:11px;padding:12px 16px;font-weight:800;font-size:14px;cursor:pointer;text-decoration:none}
-.primary{background:var(--purple);color:#fff}.secondary{background:#26324c;color:#edf1f9}.download{background:var(--green);color:#fff}
+.primary{background:var(--purple);color:#fff}.secondary{background:#26324c;color:#edf1f9}.danger{background:#9b3044;color:#fff}.download{background:var(--green);color:#fff}
 button:disabled{opacity:.45;cursor:not-allowed}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .mode{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -66,7 +66,7 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   <div class="pills">
     <span class="pill">Processes on your device</span>
     <span class="pill">Android · iPhone · Mac · Windows</span>
-    <span class="pill alt">Online Beta · Engine v2.5</span>
+    <span class="pill alt">Online Beta · Engine v2.5.1</span>
   </div>
 </header>
 
@@ -88,14 +88,16 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
 
   <div class="mode" style="margin-top:14px">
     <label><input type="radio" name="mode" value="auto" checked> <b>Automatic Caption Detection</b><div class="small">CaptionClean detects the caption area automatically on every frame.</div></label>
-    <label><input type="radio" name="mode" value="manual"> <b>Manual Caption Area</b><div class="small">Pause the video and drag a box directly over the caption area.</div></label>
+    <label><input type="radio" name="mode" value="manual"> <b>Manual Caption Areas</b><div class="small">Draw one or more boxes over every caption location.</div></label>
   </div>
 
   <div id="manualBox" class="manual hidden">
-    <b>Manual Caption Area</b>
-    <div class="small" style="margin-top:6px">Pause on a frame where the full caption is visible, then drag directly on the video to select the entire caption, including its outline/shadow.</div>
+    <b>Manual Caption Areas</b>
+    <div class="small" style="margin-top:6px">Click or tap the video to play or pause it. Drag a box over each caption location. Every finished box stays selected, so you can add multiple areas.</div>
+    <div id="manualAreaCount" class="small" style="margin-top:8px">No manual areas selected.</div>
     <div class="row" style="margin-top:10px">
-      <button id="resetAreaBtn" class="secondary" type="button">Reset Manual Area</button>
+      <button id="undoAreaBtn" class="secondary" type="button">Undo Last Area</button>
+      <button id="resetAreaBtn" class="secondary" type="button">Clear All Areas</button>
     </div>
   </div>
 
@@ -109,11 +111,12 @@ footer{text-align:center;color:#718097;font-size:12px;margin-top:30px;line-heigh
   <div class="step">3. Remove captions</div>
   <div class="row">
     <button id="processBtn" class="primary">Remove Captions</button>
+    <button id="cancelBtn" class="danger hidden" type="button">Cancel Processing</button>
     <button id="installBtn" class="secondary hidden">Install CaptionClean</button>
   </div>
   <div class="progress"><div id="progressBar" class="bar"></div></div>
   <div id="status" class="status">Ready.</div>
-  <div class="warning">Engine v2.5 reconstructs inward from the clean edge of each caption-shaped mask. It avoids the broad blur bands and temporal dark patches from earlier tests. Keep this tab open while it works.</div>
+  <div class="warning">You may switch to another tab while processing. Do not close, reload, or navigate away from CaptionClean. Phones may still pause processing if the operating system suspends Chrome in the background.</div>
 </section>
 
 <section id="resultCard" class="card hidden">
@@ -156,12 +159,14 @@ const editorCard = $("editorCard");
 const processCard = $("processCard");
 const resultCard = $("resultCard");
 const processBtn = $("processBtn");
+const cancelBtn = $("cancelBtn");
 const checkBtn = $("checkBtn");
 const statusEl = $("status");
 const progressBar = $("progressBar");
 const fileInfo = $("fileInfo");
 const detectMessage = $("detectMessage");
 const manualBox = $("manualBox");
+const manualAreaCount = $("manualAreaCount");
 const downloadBtn = $("downloadBtn");
 const installBtn = $("installBtn");
 
@@ -171,6 +176,12 @@ let outputURL = null;
 let outputFileHandle = null;
 let outputStoredInOpfs = false;
 let deferredInstallPrompt = null;
+let currentConversion = null;
+let currentOutput = null;
+let cancelRequested = false;
+let isProcessing = false;
+let wakeLock = null;
+let processingCanvas = null;
 
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
@@ -189,13 +200,23 @@ function humanBytes(n){
   return (n/(1024*1024)).toFixed(1)+" MB";
 }
 
-let manualNorm = [0.10,0.75,0.90,0.83];
+let manualNorms = [];
+let manualDraft = null;
 let drawingManual = false;
 let manualStart = null;
+let manualMoved = false;
 
-function currentManualBox(w,h){
-  const [l,t,r,b] = manualNorm;
-  return [Math.round(l*w),Math.round(t*h),Math.round(r*w),Math.round(b*h)];
+function currentManualBoxes(w,h){
+  return manualNorms.map(([l,t,r,b])=>[
+    Math.round(l*w),Math.round(t*h),Math.round(r*w),Math.round(b*h)
+  ]);
+}
+
+function updateManualAreaCount(){
+  const count=manualNorms.length;
+  manualAreaCount.textContent=count
+    ? `${count} manual area${count===1?"":"s"} selected. Drag again to add another.`
+    : "No manual areas selected.";
 }
 
 function overlayPointToNormalized(ev){
@@ -206,12 +227,13 @@ function overlayPointToNormalized(ev){
 }
 
 overlay.addEventListener("pointerdown",(ev)=>{
-  if(mode()!=="manual" || !sourceVideo.videoWidth) return;
+  if(isProcessing || mode()!=="manual" || !sourceVideo.videoWidth) return;
   ev.preventDefault();
   overlay.setPointerCapture?.(ev.pointerId);
   drawingManual = true;
+  manualMoved = false;
   manualStart = overlayPointToNormalized(ev);
-  manualNorm = [manualStart[0],manualStart[1],manualStart[0],manualStart[1]];
+  manualDraft = [manualStart[0],manualStart[1],manualStart[0],manualStart[1]];
   drawEditorOverlay();
 });
 
@@ -219,7 +241,8 @@ overlay.addEventListener("pointermove",(ev)=>{
   if(!drawingManual || mode()!=="manual") return;
   ev.preventDefault();
   const p = overlayPointToNormalized(ev);
-  manualNorm = [
+  if(Math.hypot(p[0]-manualStart[0],p[1]-manualStart[1])>0.008)manualMoved=true;
+  manualDraft = [
     Math.min(manualStart[0],p[0]),
     Math.min(manualStart[1],p[1]),
     Math.max(manualStart[0],p[0]),
@@ -228,25 +251,55 @@ overlay.addEventListener("pointermove",(ev)=>{
   drawEditorOverlay();
 });
 
-function finishManualDraw(ev){
+async function finishManualDraw(ev){
   if(!drawingManual) return;
   drawingManual = false;
   try{overlay.releasePointerCapture?.(ev.pointerId)}catch(_){}
-  const [l,t,r,b] = manualNorm;
-  if((r-l)<0.03 || (b-t)<0.02){
-    manualNorm = [0.10,0.75,0.90,0.83];
-    detectMessage.textContent = "Selection was too small. Drag a larger box around the full caption.";
-  }else{
-    detectMessage.textContent = "Manual caption area selected. This green box will be used during removal.";
+  const [l,t,r,b] = manualDraft;
+  if(ev.type==="pointerup"&&!manualMoved){
+    manualDraft = null;
+    if(sourceVideo.paused){
+      try{
+        await sourceVideo.play();
+        detectMessage.textContent = "Video playing. Click or tap the video again to pause; drag to add a caption area.";
+      }catch(_){
+        detectMessage.textContent = "The browser could not start playback. Use the video play control and try again.";
+      }
+    }else{
+      sourceVideo.pause();
+      detectMessage.textContent = "Video paused. Drag over each caption area, or click the video to continue playing.";
+    }
+    drawEditorOverlay();
+    return;
   }
+  if((r-l)<0.03 || (b-t)<0.02){
+    detectMessage.textContent = "Selection was too small and was not added. Drag a larger box around the full caption.";
+  }else{
+    manualNorms.push([...manualDraft]);
+    detectMessage.textContent = `${manualNorms.length} manual caption area${manualNorms.length===1?"":"s"} selected. Draw another box or start removal.`;
+  }
+  manualDraft = null;
+  updateManualAreaCount();
   drawEditorOverlay();
 }
 overlay.addEventListener("pointerup",finishManualDraw);
 overlay.addEventListener("pointercancel",finishManualDraw);
 
 $("resetAreaBtn").addEventListener("click",()=>{
-  manualNorm = [0.10,0.75,0.90,0.83];
-  detectMessage.textContent = "Manual area reset. Drag directly on the video to select the caption area.";
+  manualNorms = [];
+  manualDraft = null;
+  detectMessage.textContent = "All manual areas cleared. Drag directly on the video to add a caption area.";
+  updateManualAreaCount();
+  drawEditorOverlay();
+});
+
+$("undoAreaBtn").addEventListener("click",()=>{
+  if(manualNorms.length)manualNorms.pop();
+  manualDraft = null;
+  detectMessage.textContent = manualNorms.length
+    ? "Last manual area removed."
+    : "No manual areas selected. Drag directly on the video to add one.";
+  updateManualAreaCount();
   drawEditorOverlay();
 });
 
@@ -256,8 +309,9 @@ document.querySelectorAll('input[name="mode"]').forEach(r=>{
     manualBox.classList.toggle("hidden", !manual);
     overlay.classList.toggle("manual-draw", manual);
     detectMessage.textContent = manual
-      ? "Manual mode: pause on a caption and drag directly on the video to select the full caption area."
+      ? "Manual mode: drag one box over each caption location. You can add multiple areas."
       : "Automatic mode: CaptionClean detects the caption area automatically on every frame.";
+    updateManualAreaCount();
     drawEditorOverlay();
   });
 });
@@ -266,6 +320,9 @@ fileInput.addEventListener("change", async ()=>{
   const f=fileInput.files?.[0];
   if(!f) return;
   selectedFile=f;
+  manualNorms=[];
+  manualDraft=null;
+  updateManualAreaCount();
   if(inputURL) URL.revokeObjectURL(inputURL);
   inputURL=URL.createObjectURL(f);
   sourceVideo.src=inputURL;
@@ -314,35 +371,55 @@ async function drawEditorOverlay(){
   const ctx=overlay.getContext("2d");
   ctx.clearRect(0,0,overlay.width,overlay.height);
 
-  let box=null;
+  let boxes=[];
   if(mode()==="manual"){
-    box=currentManualBox(sourceVideo.videoWidth,sourceVideo.videoHeight);
+    boxes=currentManualBoxes(sourceVideo.videoWidth,sourceVideo.videoHeight);
+    if(manualDraft){
+      const [l,t,r,b]=manualDraft;
+      boxes.push([
+        Math.round(l*sourceVideo.videoWidth),Math.round(t*sourceVideo.videoHeight),
+        Math.round(r*sourceVideo.videoWidth),Math.round(b*sourceVideo.videoHeight)
+      ]);
+    }
   }else{
     try{
       const img=await captureCurrentFrame();
-      if(img) box=detectCaptionBox(img);
+      if(img){const box=detectCaptionBox(img);if(box)boxes=[box];}
     }catch(_){}
   }
-  if(!box) return;
+  if(!boxes.length) return;
 
-  const rect=sourceVideo.getBoundingClientRect();
   const sx=overlay.width/sourceVideo.videoWidth;
   const sy=overlay.height/sourceVideo.videoHeight;
   ctx.strokeStyle="#34e39a";
   ctx.lineWidth=Math.max(2,(window.devicePixelRatio||1)*2);
   ctx.fillStyle="rgba(52,227,154,.10)";
-  ctx.fillRect(box[0]*sx,box[1]*sy,(box[2]-box[0])*sx,(box[3]-box[1])*sy);
-  ctx.strokeRect(box[0]*sx,box[1]*sy,(box[2]-box[0])*sx,(box[3]-box[1])*sy);
+  boxes.forEach((box,index)=>{
+    const x=box[0]*sx,y=box[1]*sy,w=(box[2]-box[0])*sx,h=(box[3]-box[1])*sy;
+    ctx.fillRect(x,y,w,h);
+    ctx.strokeRect(x,y,w,h);
+    if(mode()==="manual" && index<manualNorms.length){
+      const label=String(index+1);
+      ctx.font=`bold ${Math.max(13,Math.round(14*(window.devicePixelRatio||1)))}px sans-serif`;
+      ctx.fillStyle="#34e39a";
+      ctx.fillText(label,x+5,y+18);
+      ctx.fillStyle="rgba(52,227,154,.10)";
+    }
+  });
 }
 
 checkBtn.addEventListener("click",async()=>{
   const img=await captureCurrentFrame();
   if(!img) return;
-  const box=mode()==="manual"?currentManualBox(img.width,img.height):detectCaptionBox(img);
-  if(box){
-    detectMessage.textContent="Caption area found. The green box shows what CaptionClean will remove on this frame.";
+  const boxes=mode()==="manual"?currentManualBoxes(img.width,img.height):[detectCaptionBox(img)].filter(Boolean);
+  if(boxes.length){
+    detectMessage.textContent=mode()==="manual"
+      ? `${boxes.length} manual caption area${boxes.length===1?"":"s"} selected. All green boxes will be processed on every frame.`
+      : "Caption area found. The green box shows what CaptionClean will remove on this frame.";
   }else{
-    detectMessage.textContent="No caption detected on this frame. Scrub to a frame with text, or switch to Manual area.";
+    detectMessage.textContent=mode()==="manual"
+      ? "No manual areas selected. Drag one or more boxes directly on the video."
+      : "No caption detected on this frame. Scrub to a frame with text, or switch to Manual areas.";
   }
   await drawEditorOverlay();
 });
@@ -679,8 +756,6 @@ async function createOutputDestination(){
   if(!(sourceVideo.duration>60)){
     return {target:new BufferTarget(),fileHandle:null,storedInOpfs:false};
   }
-  // Long MP4 files must not be accumulated in one large ArrayBuffer on phones.
-  // OPFS keeps the growing file on device storage while frames are processed.
   if(navigator.storage?.getDirectory){
     try{
       const root=await navigator.storage.getDirectory();
@@ -695,27 +770,33 @@ async function createOutputDestination(){
       console.warn("Device-storage streaming is unavailable; using memory output.",error);
     }
   }
-  if(sourceVideo.duration>60){
-    throw new Error("Long-video storage mode is unavailable. Update Chrome and make sure the site is not in Private or Incognito mode.");
-  }
-  return {target:new BufferTarget(),fileHandle:null,storedInOpfs:false};
+  throw new Error("Long-video storage mode is unavailable. Update Chrome and make sure the site is not in Private or Incognito mode.");
 }
 
-async function processVideoSample(sample,state){
-  if(workCanvas.width!==sample.displayWidth||workCanvas.height!==sample.displayHeight){
-    workCanvas.width=sample.displayWidth;
-    workCanvas.height=sample.displayHeight;
+function getProcessingCanvas(width,height){
+  if(!processingCanvas){
+    processingCanvas=typeof OffscreenCanvas!=="undefined"
+      ?new OffscreenCanvas(width,height)
+      :workCanvas;
   }
+  if(processingCanvas.width!==width)processingCanvas.width=width;
+  if(processingCanvas.height!==height)processingCanvas.height=height;
+  return processingCanvas;
+}
 
-  const ctx=workCanvas.getContext("2d",{willReadFrequently:true});
+function processVideoSample(sample,state){
+  if(cancelRequested)throw new Error("CaptionClean processing was canceled.");
+  const canvas=getProcessingCanvas(sample.displayWidth,sample.displayHeight);
+
+  const ctx=canvas.getContext("2d",{willReadFrequently:true});
   sample.draw(ctx,0,0);
-  const img=ctx.getImageData(0,0,workCanvas.width,workCanvas.height);
-  let box;
+  const img=ctx.getImageData(0,0,canvas.width,canvas.height);
+  let boxes=[];
 
   if(mode()==="manual"){
-    box=currentManualBox(workCanvas.width,workCanvas.height);
+    boxes=currentManualBoxes(canvas.width,canvas.height);
   }else{
-    box=detectCaptionBox(img);
+    let box=detectCaptionBox(img);
     if(!box&&state.previousBox&&state.misses<2){
       box=state.previousBox;
       state.misses++;
@@ -726,31 +807,85 @@ async function processVideoSample(sample,state){
       state.previousBox=null;
       state.misses++;
     }
+    if(box)boxes=[box];
   }
 
-  if(box){
-    const masked=inpaintCaptionPixels(img,box);
-    if(masked){
-      ctx.putImageData(img,0,0);
-      state.maskedPixels+=masked;
-      state.cleanedFrames++;
-    }
+  let masked=0;
+  for(const box of boxes)masked+=inpaintCaptionPixels(img,box);
+  if(masked){
+    ctx.putImageData(img,0,0);
+    state.maskedPixels+=masked;
+    state.cleanedFrames++;
   }
   state.frames++;
-
-  // Give Chrome a chance to repaint after every frame on older computers.
-  await new Promise(resolve=>requestAnimationFrame(resolve));
-  return workCanvas;
+  return canvas;
 }
 
+async function requestProcessingWakeLock(){
+  if(!isProcessing||document.hidden||!("wakeLock" in navigator)||wakeLock)return;
+  try{
+    wakeLock=await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release",()=>{wakeLock=null;},{once:true});
+  }catch(_){}
+}
+
+async function releaseProcessingWakeLock(){
+  const lock=wakeLock;
+  wakeLock=null;
+  try{await lock?.release();}catch(_){}
+}
+
+function setProcessingUI(active){
+  isProcessing=active;
+  processBtn.disabled=active;
+  checkBtn.disabled=active;
+  fileInput.disabled=active;
+  $("resetAreaBtn").disabled=active;
+  $("undoAreaBtn").disabled=active;
+  document.querySelectorAll('input[name="mode"]').forEach(input=>input.disabled=active);
+  cancelBtn.classList.toggle("hidden",!active);
+  cancelBtn.disabled=!active;
+  overlay.classList.toggle("manual-draw",!active&&mode()==="manual");
+}
+
+document.addEventListener("visibilitychange",()=>{
+  if(!isProcessing)return;
+  if(!document.hidden)requestProcessingWakeLock();
+});
+
+window.addEventListener("beforeunload",(event)=>{
+  if(!isProcessing)return;
+  event.preventDefault();
+  event.returnValue="";
+});
+
+cancelBtn.addEventListener("click",async()=>{
+  if(!isProcessing||cancelRequested)return;
+  cancelRequested=true;
+  cancelBtn.disabled=true;
+  statusEl.classList.remove("error");
+  statusEl.textContent="Canceling processing and releasing video resources…";
+  const conversion=currentConversion;
+  const output=currentOutput;
+  try{await conversion?.cancel();}catch(_){}
+  try{
+    if(output&&!['canceled','finalized'].includes(output.state))await output.cancel();
+  }catch(_){}
+});
+
 processBtn.addEventListener("click",async()=>{
-  if(!selectedFile)return;
+  if(!selectedFile||isProcessing)return;
+  if(mode()==="manual"&&!manualNorms.length){
+    statusEl.classList.add("error");
+    statusEl.textContent="Select at least one manual caption area before starting.";
+    return;
+  }
   const isLongVideo=sourceVideo.duration>60;
-  let activeOutput=null;
-  processBtn.disabled=true;
-  checkBtn.disabled=true;
-  resultCard.classList.add("hidden");
+  cancelRequested=false;
+  setProcessingUI(true);
+  requestProcessingWakeLock();
   if(isLongVideo||outputStoredInOpfs)clearOutputPreview();
+  resultCard.classList.add("hidden");
   statusEl.classList.remove("error");
   setProgress(1,"Starting the lightweight browser video engine…");
 
@@ -781,7 +916,7 @@ processBtn.addEventListener("click",async()=>{
       format:new Mp4OutputFormat(),
       target:destination.target
     });
-    activeOutput=output;
+    currentOutput=output;
     const state={previousBox:null,misses:0,frames:0,cleanedFrames:0,maskedPixels:0};
     setProgress(3,"Preparing hardware-accelerated video processing…");
 
@@ -794,10 +929,16 @@ processBtn.addEventListener("click",async()=>{
         quality:new Quality("high"),
         hardwareAcceleration:"prefer-hardware",
         forceTranscode:true,
-        process:async(sample)=>processVideoSample(sample,state)
+        process:(sample)=>processVideoSample(sample,state)
       }
       // Omitting frameRate preserves the original FPS. Audio is copied whenever compatible.
     });
+    currentConversion=conversion;
+
+    if(cancelRequested){
+      await conversion.cancel();
+      throw new Error("CaptionClean processing was canceled.");
+    }
 
     if(!conversion.isValid||conversion.discardedTracks?.length){
       const reasons=(conversion.discardedTracks||[]).map(x=>x.reason).filter(Boolean);
@@ -806,9 +947,12 @@ processBtn.addEventListener("click",async()=>{
 
     conversion.onProgress=(p)=>{
       const fraction=Math.max(0,Math.min(1,p));
-      setProgress(5+fraction*90,`Removing captions… ${Math.round(fraction*100)}%`);
+      const background=document.hidden?" · Background processing active":"";
+      setProgress(5+fraction*90,`Removing captions… ${Math.round(fraction*100)}%${background}`);
     };
     await conversion.execute();
+
+    if(cancelRequested)throw new Error("CaptionClean processing was canceled.");
 
     let resultFile;
     if(outputFileHandle){
@@ -824,7 +968,6 @@ processBtn.addEventListener("click",async()=>{
       if(outputURL)URL.revokeObjectURL(outputURL);
       resultFile=new Blob([buffer],{type:"video/mp4"});
     }
-
     outputURL=URL.createObjectURL(resultFile);
     resultVideo.src=outputURL;
     downloadBtn.href=outputURL;
@@ -835,14 +978,23 @@ processBtn.addEventListener("click",async()=>{
   }catch(e){
     console.error(e);
     try{
-      if(outputStoredInOpfs&&activeOutput&&!['canceled','finalized'].includes(activeOutput.state))await activeOutput.cancel();
+      if(outputStoredInOpfs&&currentOutput&&!['canceled','finalized'].includes(currentOutput.state))await currentOutput.cancel();
     }catch(_){}
-    statusEl.classList.add("error");
-    statusEl.textContent="Processing failed: "+(e?.message||String(e))+
-      "\n\nClose other tabs and try a shorter video. If it still fails, send a screenshot of this exact message.";
+    if(cancelRequested||/cancell?ed/i.test(e?.name||"")||/cancell?ed/i.test(e?.message||"")){
+      statusEl.classList.remove("error");
+      setProgress(0,"Processing canceled. Your original video was not changed.");
+    }else{
+      statusEl.classList.add("error");
+      statusEl.textContent="Processing failed: "+(e?.message||String(e))+
+        "\n\nTry a shorter video or keep CaptionClean open in the foreground. If it still fails, send a screenshot of this exact message.";
+    }
   }finally{
-    processBtn.disabled=false;
-    checkBtn.disabled=false;
+    currentConversion=null;
+    currentOutput=null;
+    processingCanvas=null;
+    await releaseProcessingWakeLock();
+    setProcessingUI(false);
+    cancelRequested=false;
   }
 });
 
@@ -851,6 +1003,9 @@ $("newBtn").addEventListener("click",()=>{
   if(outputStoredInOpfs)clearOutputPreview();
   fileInput.value="";
   selectedFile=null;
+  manualNorms=[];
+  manualDraft=null;
+  updateManualAreaCount();
   sourceVideo.removeAttribute("src");sourceVideo.load();
   editorCard.classList.add("hidden");
   processCard.classList.add("hidden");
@@ -871,7 +1026,7 @@ installBtn.addEventListener("click",async()=>{
 });
 
 if("serviceWorker" in navigator){
-  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=fmm-4").catch(console.warn));
+  window.addEventListener("load",()=>navigator.serviceWorker.register("./sw.js?v=controls-longvideo-1").catch(console.warn));
 }
 </script>
 </body>
